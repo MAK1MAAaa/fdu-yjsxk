@@ -11,6 +11,9 @@ from .errors import CachePause, CookieError, DeadlineReached, TransientError
 from .logging import log
 from .settings import validate_config
 
+PREWARM_LEAD_SECS = 20
+REFRESH_GUARD_SECS = 5
+
 
 def cache_resume_at(now: dt.datetime, interval: float) -> dt.datetime:
     release = now.replace(hour=13, minute=0, second=0, microsecond=0)
@@ -86,7 +89,7 @@ def run_serial(gr: Grabber, pending: list, done: list, interval: float) -> None:
                 continue
             xid = info
             gr.inflight[c["bjdm"]] = xid
-            log(f"  已提交 {c['name']}（{c['bjdm']}），等待结果 ...")
+            log(f"  已收到受理号：{c['name']}（{c['bjdm']}），等待最终结果 ...")
         code, msg = gr.poll_result(xid)
         if code is None and not already_have(msg):
             log(f"  {c['name']}：{msg}；保留受理号，继续查询，暂不提交其他课程")
@@ -169,6 +172,33 @@ def countdown_banner(deadline: dt.datetime, n_courses: int) -> None:
     log("=" * 46)
 
 
+def prepare_and_wait(
+    target: dt.datetime, label: str, gr: Grabber, cfg: dict, refresh_secs: float,
+) -> None:
+    """在目标时刻前预热；最后 5 秒不主动启动常规登录态刷新。"""
+    if gr.deadline is not None:
+        target = min(target, gr.deadline)
+    prewarm = target - dt.timedelta(seconds=PREWARM_LEAD_SECS)
+    if dt.datetime.now() < prewarm:
+        wait_until_with_keepalive(prewarm, label, gr, cfg, refresh_secs)
+    gr.check_deadline()
+    if (target - dt.datetime.now()).total_seconds() > REFRESH_GUARD_SECS:
+        try:
+            gr.set_cookie(obtain_cookie(cfg))
+            # 浏览器读取可能很慢，返回后重新判断是否已进入保护时段。
+            gr.check_deadline()
+            refresh_budget = (target - dt.datetime.now()).total_seconds() - REFRESH_GUARD_SECS
+            if refresh_budget > 0:
+                gr.refresh_token(timeout_limit=refresh_budget)
+                log(f"{label}：已提前刷新登录态与 Token")
+        except CookieError as exc:
+            gr.token = None
+            log(f"{label}：预热提示登录态需恢复：{exc}")
+        except TransientError as exc:
+            log(f"{label}：预热失败，保留可用登录态，必要时恢复：{exc}")
+    wait_until(target, label)
+
+
 def run(cfg: dict, start_now: bool) -> int:
     validate_config(cfg)
     interval = float(cfg.get("request_interval", 0.8))
@@ -202,6 +232,7 @@ def run(cfg: dict, start_now: bool) -> int:
         f"满额上限 {cfg.get('full_max_tries', 0)}（0=不限）；截止 {end_time}"
     )
 
+    refresh_deferred_until: dt.datetime | None = None
     if start_now:
         log("（--now：跳过等待，立即开始）")
     else:
@@ -212,24 +243,8 @@ def run(cfg: dict, start_now: bool) -> int:
             log("=" * 46)
         else:
             countdown_banner(start_time, len(pending))
-            # 临近开抢前 3 分钟换一次新 Cookie，避免等待期间过期
-            prewarm = start_time - dt.timedelta(seconds=180)
-            if prewarm > dt.datetime.now():
-                wait_until_with_keepalive(
-                    prewarm,
-                    "等待换票点",
-                    gr,
-                    cfg,
-                    refresh_secs,
-                )
-                log("临近开抢，重新获取一次最新 Cookie ...")
-                try:
-                    gr.set_cookie(obtain_cookie(cfg))
-                    gr.refresh_token()
-                    log("已读取最新 Cookie 并刷新 CSRF Token")
-                except (CookieError, TransientError) as exc:
-                    log(f"换新票失败（继续用旧票）：{exc}")
-            wait_until(start_time, "等待开抢")
+            prepare_and_wait(start_time, "等待开抢", gr, cfg, refresh_secs)
+            refresh_deferred_until = start_time + dt.timedelta(seconds=REFRESH_GUARD_SECS)
 
     # ---- 正式抢课 ----
     log("开始抢课！（串行模式：一门结果出来再选下一门）")
@@ -242,7 +257,11 @@ def run(cfg: dict, start_now: bool) -> int:
         round_no += 1
         try:
             if not gr.inflight:
-                if time.monotonic() - last_cookie_ts >= refresh_secs:
+                routine_refresh = (
+                    refresh_deferred_until is None
+                    or dt.datetime.now() >= refresh_deferred_until
+                )
+                if routine_refresh and time.monotonic() - last_cookie_ts >= refresh_secs:
                     try:
                         changed = gr.set_cookie(obtain_cookie(cfg))
                         if changed:
@@ -251,20 +270,22 @@ def run(cfg: dict, start_now: bool) -> int:
                         log(f"读取新 Cookie 失败，继续当前会话：{exc}")
                     finally:
                         last_cookie_ts = time.monotonic()
-                gr.ensure_token()
+                if gr.token is None or routine_refresh:
+                    gr.ensure_token()
             run_serial(gr, pending, done, interval)
         except DeadlineReached:
             break
         except CachePause:
             resume = min(cache_resume_at(dt.datetime.now(), interval), end_time)
-            log(f"服务器数据缓存中，等待至 {resume:%H:%M:%S} 后从第一顺位重试")
-            gr.token = None
+            log(f"服务器数据缓存中，等待至 {resume:%H:%M:%S.%f} 后从第一顺位重试")
+            refresh_deferred_until = resume + dt.timedelta(seconds=REFRESH_GUARD_SECS)
             if resume < end_time:
-                wait_until_with_keepalive(resume, "等待缓存结束", gr, cfg, refresh_secs)
+                prepare_and_wait(resume, "等待缓存结束", gr, cfg, refresh_secs)
             else:
                 gr.pause((resume - dt.datetime.now()).total_seconds())
             continue
         except CookieError as exc:
+            refresh_deferred_until = None
             gr.token = None
             log(f"回合 {round_no}：{exc}；重新读取 Cookie")
             try:

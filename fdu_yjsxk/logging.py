@@ -9,9 +9,10 @@ from .settings import LOG_PATH
 
 def log(msg: str = "") -> None:
     now = dt.datetime.now()
-    print(f"[{now:%H:%M:%S}] {msg}", flush=True)
+    millis = now.microsecond // 1000
+    print(f"[{now:%H:%M:%S}.{millis:03d}] {msg}", flush=True)
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as fh:
-            fh.write(f"[{now:%Y-%m-%d %H:%M:%S}] {msg}\n")
+            fh.write(f"[{now:%Y-%m-%d %H:%M:%S}.{millis:03d}] {msg}\n")
     except OSError:
         pass

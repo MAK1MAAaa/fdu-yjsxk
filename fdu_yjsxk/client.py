@@ -11,6 +11,7 @@ import time
 import requests
 
 from .errors import CookieError, DeadlineReached, TransientError
+from .logging import log
 from .settings import DOMAIN
 
 UA = (
@@ -78,6 +79,34 @@ class Grabber:
         if seconds > 0:
             time.sleep(seconds)
 
+    def _request(
+        self, method: str, url: str, label: str, *, data: dict | None = None,
+        headers: dict | None = None, timeout_limit: float | None = None,
+    ) -> requests.Response:
+        """记录客户端 HTTP 调用边界；不记录登录凭据或请求载荷。"""
+        timeout = self.request_timeout()
+        if timeout_limit is not None:
+            timeout = min(timeout, timeout_limit)
+        log(f"{label}：开始请求")
+        started = time.monotonic()
+        try:
+            kwargs = {
+                "headers": headers if headers is not None else self._headers(),
+                "timeout": timeout,
+                "allow_redirects": False,
+            }
+            if method == "GET":
+                resp = self.session.get(url, **kwargs)
+            else:
+                resp = self.session.post(url, data=data, **kwargs)
+        except requests.RequestException as exc:
+            elapsed_ms = (time.monotonic() - started) * 1000
+            log(f"{label}：请求异常 {type(exc).__name__}，耗时 {elapsed_ms:.1f}ms")
+            raise
+        elapsed_ms = (time.monotonic() - started) * 1000
+        log(f"{label}：收到响应 HTTP {resp.status_code}，耗时 {elapsed_ms:.1f}ms")
+        return resp
+
     @staticmethod
     def check_response(resp: requests.Response) -> None:
         if resp.status_code in (301, 302, 303, 307, 308, 401, 403):
@@ -102,12 +131,13 @@ class Grabber:
             return self.refresh_token()
         return self.token
 
-    def refresh_token(self) -> str:
+    def refresh_token(self, timeout_limit: float | None = None) -> str:
         url = f"{self.base}/xsxkHome/gotoChooseCourse.do"
         try:
-            resp = self.session.get(
-                url, headers={**self._headers(), "Cache-Control": "no-cache"},
-                timeout=self.request_timeout(), allow_redirects=False
+            resp = self._request(
+                "GET", url, "刷新主页",
+                headers={**self._headers(), "Cache-Control": "no-cache"},
+                timeout_limit=timeout_limit,
             )
         except requests.RequestException as exc:
             raise TransientError(f"打开选课页网络异常：{type(exc).__name__}") from exc
@@ -129,9 +159,8 @@ class Grabber:
             "csrfToken": self.token,
         }
         try:
-            resp = self.session.post(
-                url, headers=self._headers(), data=payload,
-                timeout=self.request_timeout(), allow_redirects=False
+            resp = self._request(
+                "POST", url, f"提交选课 / {course['name']}", data=payload,
             )
         except requests.RequestException as exc:
             raise TransientError(f"提交请求网络异常：{type(exc).__name__}，本次结果未知") from exc
@@ -174,18 +203,16 @@ class Grabber:
 
     def poll_result(self, xid: str) -> tuple[int | None, str]:
         """轮询选课结果。返回 (code, 说明)；code==1 表示真的选上了。"""
+        started = time.monotonic()
         max_times = int(self.cfg.get("poll_max", 30))
         interval = float(self.cfg.get("poll_interval", 0.6))
         last_network_error: str | None = None
         for _ in range(max_times):
             url = f"{self.base}/xsxkCourse/loadXkjgRes.do?_={int(time.time() * 1000)}"
             try:
-                resp = self.session.post(
-                    url,
-                    headers=self._headers(),
+                resp = self._request(
+                    "POST", url, "查询选课结果",
                     data={"xid": xid, "sfhqdqxkqqs": 0},
-                    timeout=self.request_timeout(),
-                    allow_redirects=False,
                 )
             except requests.RequestException as exc:
                 last_network_error = type(exc).__name__
@@ -209,6 +236,9 @@ class Grabber:
                     return None, str(msg)
                 if not isinstance(detail, dict) or detail.get("code") not in (0, 1):
                     return None, "轮询尚未返回明确结果"
+                elapsed_ms = (time.monotonic() - started) * 1000
+                outcome = "成功" if detail["code"] == 1 else "未成功"
+                log(f"取得最终结果：{outcome}，本次查询累计耗时 {elapsed_ms:.1f}ms")
                 return detail["code"], str(detail.get("msg") or "")
             self.pause(interval)
         if last_network_error:

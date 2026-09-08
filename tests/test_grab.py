@@ -5,11 +5,11 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 import json
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, mock_open, patch
 
 import requests
 
-from fdu_yjsxk import client, cookies, errors, runner, settings
+from fdu_yjsxk import client, cookies, errors, logging as file_logging, runner, settings
 
 
 FULL = "教学班容量已满或退选的课程席暂未释放。（#6qz9u）"
@@ -49,6 +49,7 @@ class GrabberTests(unittest.TestCase):
         self.stack.enter_context(patch("fdu_yjsxk.runner.time.monotonic", lambda: self.elapsed))
         self.stack.enter_context(patch("fdu_yjsxk.runner.time.sleep", self.advance))
         self.logger = self.stack.enter_context(patch("fdu_yjsxk.runner.log"))
+        self.http_logger = self.stack.enter_context(patch("fdu_yjsxk.client.log"))
         self.stack.enter_context(patch("fdu_yjsxk.cookies.log"))
         self.stack.enter_context(patch(
             "requests.sessions.Session.request",
@@ -157,6 +158,193 @@ class GrabberTests(unittest.TestCase):
         self.assertEqual(attempts[1], (COURSES[0]["bjdm"], release))
         self.assertEqual(attempts[2][0], COURSES[1]["bjdm"])
         self.assertTrue(all(at >= release for _, at in attempts[1:]))
+        self.assertEqual(self.gr.session.get.call_count, 1)
+
+    def test_cache_release_skips_slow_homepage_request(self) -> None:
+        self.clock = datetime(2026, 9, 7, 12, 59, 56)
+        release = datetime(2026, 9, 7, 13, 0)
+        self.cfg["full_max_tries"] = 1
+        attempts = []
+
+        def homepage(*args, **kwargs):
+            self.advance(1.2)
+            return response(text=f'<input id="csrfToken" value="{TOKEN}">')
+
+        def submit(course):
+            attempts.append((course["bjdm"], self.clock))
+            return False, CACHE if self.clock < release else FULL
+
+        self.gr.session.get.side_effect = homepage
+        self.gr.submit = Mock(side_effect=submit)
+        self.run_local()
+        self.assertEqual(attempts[1], (COURSES[0]["bjdm"], release))
+        self.assertEqual(self.gr.session.get.call_count, 1)
+
+    def test_repeated_cache_preserves_token_cookie_and_request_interval(self) -> None:
+        self.cfg["full_max_tries"] = 1
+        self.cfg["cookie_refresh_secs"] = 0.1
+        self.gr.submit = Mock(side_effect=[
+            (False, CACHE), (False, CACHE), (False, FULL), (False, FULL),
+        ])
+        _, obtain = self.run_local()
+        obtain.assert_called_once()
+        self.assertEqual(self.gr.session.get.call_count, 1)
+        self.assertEqual(self.gr.token, TOKEN)
+        self.assertEqual(self.sleeps, [0.8] * 4)
+        self.assertEqual(
+            [call.args[0]["bjdm"] for call in self.gr.submit.call_args_list],
+            [COURSES[0]["bjdm"]] * 3 + [COURSES[1]["bjdm"]],
+        )
+
+    def test_routine_refresh_resumes_after_release_guard(self) -> None:
+        self.cfg["courses"] = [deepcopy(COURSES[0])]
+        refresh_times = []
+
+        def homepage(*args, **kwargs):
+            refresh_times.append(self.clock)
+            return response(text=f'<input id="csrfToken" value="{TOKEN}">')
+
+        self.gr.session.get.side_effect = homepage
+        self.gr.submit = Mock(side_effect=lambda _: (
+            False, CACHE if self.elapsed == 0 else FULL,
+        ))
+        self.run_local()
+        self.assertGreater(len(refresh_times), 1)
+        guard_end = datetime(2026, 9, 7, 13, 0, 5, 800000)
+        self.assertTrue(all(at >= guard_end for at in refresh_times[1:]))
+
+    def test_scheduled_start_prewarms_before_release_and_preserves_priority(self) -> None:
+        self.clock = datetime(2026, 9, 7, 12, 59, 0)
+        self.cfg["full_max_tries"] = 1
+        refresh_times, submit_times = [], []
+
+        def homepage(*args, **kwargs):
+            refresh_times.append(self.clock)
+            self.advance(0.2)
+            return response(text=f'<input id="csrfToken" value="{TOKEN}">')
+
+        def submit(course):
+            submit_times.append((course["bjdm"], self.clock))
+            return False, FULL
+
+        self.gr.session.get.side_effect = homepage
+        self.gr.submit = Mock(side_effect=submit)
+        with patch("fdu_yjsxk.runner.obtain_cookie", return_value=COOKIE):
+            with patch("fdu_yjsxk.runner.Grabber", return_value=self.gr):
+                runner.run(self.cfg, start_now=False)
+        self.assertEqual(refresh_times, [
+            datetime(2026, 9, 7, 12, 59, 0), datetime(2026, 9, 7, 12, 59, 36),
+        ])
+        self.assertEqual(submit_times[0], (
+            COURSES[0]["bjdm"], datetime(2026, 9, 7, 12, 59, 56),
+        ))
+        self.assertEqual([course for course, _ in submit_times],
+                         [course["bjdm"] for course in COURSES])
+
+    def test_last_five_seconds_do_not_start_cookie_or_homepage_refresh(self) -> None:
+        target = self.clock + timedelta(seconds=4)
+        with patch("fdu_yjsxk.runner.obtain_cookie") as obtain:
+            runner.prepare_and_wait(target, "测试等待", self.gr, self.cfg, 0.1)
+        obtain.assert_not_called()
+        self.gr.session.get.assert_not_called()
+        self.assertEqual(self.clock, target)
+
+    def test_slow_cookie_read_rechecks_guard_before_homepage(self) -> None:
+        target = self.clock + timedelta(seconds=20)
+
+        def slow_cookie(_):
+            self.advance(16)
+            return COOKIE
+
+        with patch("fdu_yjsxk.runner.obtain_cookie", side_effect=slow_cookie):
+            runner.prepare_and_wait(target, "测试等待", self.gr, self.cfg, 240)
+        self.gr.session.get.assert_not_called()
+        self.assertEqual(self.clock, target)
+
+    def test_prewarm_http_timeout_is_clipped_before_guard(self) -> None:
+        with patch("fdu_yjsxk.runner.obtain_cookie", return_value=COOKIE):
+            runner.prepare_and_wait(
+                self.clock + timedelta(seconds=7), "测试等待", self.gr, self.cfg, 240,
+            )
+        self.assertEqual(self.gr.session.get.call_args.kwargs["timeout"], 2)
+
+    def test_missing_token_is_refreshed_even_during_release_guard(self) -> None:
+        self.cfg["courses"] = [deepcopy(COURSES[0])]
+        self.cfg["full_max_tries"] = 1
+
+        def submit(_):
+            if self.elapsed == 0:
+                self.gr.token = None
+                return False, CACHE
+            self.assertEqual(self.gr.token, TOKEN)
+            return False, FULL
+
+        self.gr.submit = Mock(side_effect=submit)
+        self.run_local()
+        self.assertEqual(self.gr.session.get.call_count, 2)
+
+    def test_auth_failure_is_recovered_even_during_release_guard(self) -> None:
+        self.cfg["courses"] = [deepcopy(COURSES[0])]
+        self.cfg["full_max_tries"] = 1
+        self.gr.submit = Mock(side_effect=[
+            (False, CACHE), errors.CookieError("csrfToken 失效"), (False, FULL),
+        ])
+        _, obtain = self.run_local()
+        self.assertEqual(self.gr.session.get.call_count, 2)
+        self.assertEqual(obtain.call_count, 2)
+
+    def test_prewarm_auth_failure_invalidates_old_token(self) -> None:
+        self.gr.token = TOKEN
+        self.gr.session.get.return_value = response(status=403)
+        with patch("fdu_yjsxk.runner.obtain_cookie", return_value=COOKIE):
+            runner.prepare_and_wait(
+                self.clock + timedelta(seconds=20), "测试等待", self.gr, self.cfg, 240,
+            )
+        self.assertIsNone(self.gr.token)
+
+    def test_wait_is_clipped_to_deadline(self) -> None:
+        self.gr.deadline = self.clock + timedelta(seconds=3)
+        runner.prepare_and_wait(
+            self.clock + timedelta(seconds=20), "测试等待", self.gr, self.cfg, 240,
+        )
+        self.assertEqual(self.clock, self.gr.deadline)
+        with self.assertRaises(errors.DeadlineReached):
+            self.gr.check_deadline()
+
+    def test_http_logs_distinguish_call_and_response_without_credentials(self) -> None:
+        self.gr.token = TOKEN
+
+        def post(*args, **kwargs):
+            self.http_logger.assert_called_once_with("提交选课 / 温旭：开始请求")
+            self.advance(1.25)
+            return response({"code": 1, "msg": "private-xid"})
+
+        self.gr.session.post = Mock(side_effect=post)
+        self.assertEqual(self.gr.submit(COURSES[0]), (True, "private-xid"))
+        messages = [call.args[0] for call in self.http_logger.call_args_list]
+        self.assertIn("收到响应 HTTP 200，耗时 1250.0ms", messages[-1])
+        self.assertTrue(all(secret not in "\n".join(messages)
+                            for secret in (TOKEN, COOKIE, "private-xid")))
+
+    def test_http_exception_logs_elapsed_time_without_exception_payload(self) -> None:
+        def post(*args, **kwargs):
+            self.advance(0.5)
+            raise requests.ConnectionError(COOKIE)
+
+        self.gr.session.post = Mock(side_effect=post)
+        with self.assertRaises(errors.TransientError):
+            self.gr.submit(COURSES[0])
+        messages = [call.args[0] for call in self.http_logger.call_args_list]
+        self.assertIn("请求异常 ConnectionError，耗时 500.0ms", messages[-1])
+        self.assertNotIn(COOKIE, "\n".join(messages))
+
+    def test_terminal_and_file_logs_have_milliseconds(self) -> None:
+        self.clock = self.clock.replace(microsecond=123456)
+        with patch("builtins.open", mock_open()) as opened:
+            with patch("builtins.print") as printed:
+                file_logging.log("测试")
+        printed.assert_called_once_with("[13:00:00.123] 测试", flush=True)
+        opened().write.assert_called_once_with("[2026-09-07 13:00:00.123] 测试\n")
 
     def test_late_cache_message_retries_soon_not_tomorrow(self) -> None:
         self.clock = datetime(2026, 9, 7, 13, 0, 3)
@@ -249,6 +437,7 @@ class GrabberTests(unittest.TestCase):
         ])
         self.assertEqual(self.gr.poll_result("test-xid"), (1, "选课成功"))
         self.assertEqual(self.gr.session.post.call_count, 2)
+        self.assertIn("取得最终结果：成功", self.http_logger.call_args.args[0])
 
     def test_invalid_poll_body_remains_unknown(self) -> None:
         self.gr.session.post = Mock(return_value=response({"msg": "[]"}))
