@@ -3,16 +3,17 @@ chcp 65001 >nul
 REM 一键抢课 —— 双击即可运行（Windows 版）
 cd /d "%~dp0"
 
-set PY=python
-
-python -c "import requests, browser_cookie3" >nul 2>&1
+where uv >nul 2>&1
 if errorlevel 1 (
-  echo [提示] 未检测到依赖，先安装 requests 和 browser-cookie3 ...
-  python -m pip install -r requirements.txt
+  echo [错误] 找不到 uv。
+  echo 请先安装：https://docs.astral.sh/uv/getting-started/installation/
   echo.
+  echo 按任意键关闭窗口...
+  pause >nul
+  exit /b 1
 )
 
-python grab.py
+uv run --locked python grab.py
 set CODE=%ERRORLEVEL%
 
 echo.

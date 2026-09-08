@@ -9,6 +9,7 @@ venv/
 cookie.txt
 config.local.json
 config.json
+grab.log
 
 # 系统文件
 .DS_Store

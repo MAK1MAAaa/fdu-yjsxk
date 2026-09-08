@@ -4,16 +4,17 @@ REM 开抢前先跑这个做自检（Windows 版）
 REM 检查 Cookie 是否有效、课程代码是否正确，不会提交任何选课请求
 cd /d "%~dp0"
 
-set PY=python
-
-python -c "import requests, browser_cookie3" >nul 2>&1
+where uv >nul 2>&1
 if errorlevel 1 (
-  echo [提示] 未检测到依赖，先安装 requests 和 browser-cookie3 ...
-  python -m pip install -r requirements.txt
+  echo [错误] 找不到 uv。
+  echo 请先安装：https://docs.astral.sh/uv/getting-started/installation/
   echo.
+  echo 按任意键关闭窗口...
+  pause >nul
+  exit /b 1
 )
 
-python grab.py --dry-run
+uv run --locked python grab.py --dry-run
 
 echo.
 echo 按任意键关闭窗口...

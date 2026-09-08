@@ -7,10 +7,16 @@
 
   "_字段逐个解释": {
     "target": "选课系统域名，一般不用改",
-    "start_time": "开抢时间，格式 YYYY-MM-DD HH:MM:SS，建议比开放时间提前 3~5 秒起跑",
-    "end_time": "到点强制收工，格式同上",
+    "start_time": "开抢时间，格式 YYYY-MM-DD HH:MM:SS。遇到每日缓存提示会等到 13:00 再提交",
+    "end_time": "截止后不再发起新请求，格式同上；启动前须更新日期",
+    "cookie_source": "auto 优先读取浏览器，读取失败时使用 cookie.txt；不代表自动重新登录",
     "browser": "从哪个浏览器读登录 Cookie，edge 或 chrome",
-    "serial_mode": "务必 true。选课系统的结果轮询是单例的，并发提交会丢结果，必须一门一门来",
+    "cookie_refresh_secs": "长时间运行时，重新读取浏览器 Cookie 的间隔秒数",
+    "homepage_refresh_secs": "在轮次边界检查主页 Token 的最短刷新间隔；等待受理结果时不刷新",
+    "request_interval": "同一轮中各课程请求之间的间隔秒数",
+    "round_interval": "完成一轮全部课程尝试后，开始下一轮前等待的秒数",
+    "full_max_tries": "每门课累计满额响应的上限；0 表示不限次数，仍受 end_time 约束",
+    "serial_mode": "当前版本只支持 true：确认当前受理号结果后再提交下一门",
     "courses": "要抢的课程列表，顺序即优先级，把容量最小、最难抢的排最前面"
   },
 
@@ -20,23 +26,27 @@
     "bjdm": "★最关键★ 班级代码，格式 = 学年学期前缀(10位) + 课程代码 + 点 + 班号，例如 2026202701CS50014.01。必须从选课系统抓，见 README「bjdm 怎么获取」",
     "lx": "课程大类编码：7=学位公共课，8=学科专业课，9=公共选修课",
     "bqmc": "子分类编码：1=政治理论课，2=第一外国语，3=专业外语，4=学位基础课，5=学位专业课，6=专业选修课",
-    "enabled": "true=参与抢课，false=这轮跳过（不想抢就改成 false）"
+    "enabled": "true=参与抢课，false=这轮跳过（不想抢就改成 false）",
+    "selected": "可选的人类可读标记。已经选上的课程设为 true，并同时把 enabled 设为 false"
   },
 
-  "target": "yjsxk.fudan.edu.cn",
+  "target": "yjsxk.fudan.sh.cn",
   "start_time": "2026-09-02 09:59:55",
   "end_time": "2026-09-02 10:30:00",
 
   "cookie_source": "auto",
   "browser": "edge",
   "cookie_refresh_secs": 240,
+  "homepage_refresh_secs": 1.0,
 
   "request_interval": 0.8,
+  "round_interval": 0,
   "poll_interval": 0.6,
   "poll_max": 15,
   "http_timeout": 12,
 
   "serial_mode": true,
+  "full_max_tries": 0,
 
   "courses": [
     {
