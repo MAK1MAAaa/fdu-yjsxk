@@ -9,7 +9,7 @@ from unittest.mock import Mock, mock_open, patch
 
 import requests
 
-from fdu_yjsxk import client, cookies, errors, logging as file_logging, runner, settings
+from fdu_yjsxk import client, cookies, errors, logging as file_logging, runner, settings, single
 
 
 FULL = "教学班容量已满或退选的课程席暂未释放。（#6qz9u）"
@@ -134,6 +134,17 @@ class GrabberTests(unittest.TestCase):
         self.assertEqual(self.gr.exhausted, [first])
         self.assertEqual(done, [])
 
+    def test_single_course_run_never_submits_other_courses(self) -> None:
+        self.cfg = single.build_single_config(self.cfg, COURSES[1], 1, self.clock)
+        self.gr.cfg = self.cfg
+        self.gr.submit = Mock(side_effect=[(False, FULL), (True, "test-xid")])
+        self.gr.poll_result = Mock(return_value=(1, "选课成功"))
+        code, _ = self.run_local()
+        self.assertEqual(code, 0)
+        self.assertEqual([call.args[0]["bjdm"] for call in self.gr.submit.call_args_list],
+                         [COURSES[1]["bjdm"], COURSES[1]["bjdm"]])
+        self.gr.poll_result.assert_called_once_with("test-xid")
+
     def test_full_limit_exit_code_is_not_success(self) -> None:
         self.cfg["full_max_tries"] = 1
         self.gr.submit = Mock(return_value=(False, FULL))
@@ -195,6 +206,32 @@ class GrabberTests(unittest.TestCase):
             [call.args[0]["bjdm"] for call in self.gr.submit.call_args_list],
             [COURSES[0]["bjdm"]] * 3 + [COURSES[1]["bjdm"]],
         )
+
+    def test_sixty_second_refresh_keeps_prewarm_and_release_submission(self) -> None:
+        self.clock = datetime(2026, 9, 7, 12, 59)
+        self.cfg["homepage_refresh_secs"] = 60
+        self.cfg["end_time"] = "2026-09-07 13:01:00"
+        self.cfg["courses"] = [deepcopy(COURSES[0])]
+        release = datetime(2026, 9, 7, 13, 0)
+        refresh_times, attempts = [], []
+
+        def homepage(*args, **kwargs):
+            refresh_times.append(self.clock)
+            return response(text=f'<input id="csrfToken" value="{TOKEN}">')
+
+        def submit(course):
+            attempts.append(self.clock)
+            return False, CACHE if self.clock < release else FULL
+
+        self.gr.session.get.side_effect = homepage
+        self.gr.submit = Mock(side_effect=submit)
+        self.run_local()
+        self.assertEqual(refresh_times[:2], [
+            datetime(2026, 9, 7, 12, 59), datetime(2026, 9, 7, 12, 59, 40),
+        ])
+        self.assertEqual(attempts[1], release)
+        self.assertGreater(len(refresh_times), 2)
+        self.assertGreaterEqual(refresh_times[2], datetime(2026, 9, 7, 13, 0, 40))
 
     def test_routine_refresh_resumes_after_release_guard(self) -> None:
         self.cfg["courses"] = [deepcopy(COURSES[0])]

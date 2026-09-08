@@ -9,6 +9,7 @@ from .errors import CookieError, DeadlineReached, TransientError
 from .logging import log
 from .runner import run
 from .settings import load_config
+from .single import run_single
 
 
 def main() -> int:
@@ -17,9 +18,14 @@ def main() -> int:
     ap.add_argument("--now", action="store_true", help="忽略 start_time，立即开始")
     ap.add_argument("--probe", action="store_true", help="链路演练：发 1 次真实请求看服务器回什么")
     ap.add_argument("--force", action="store_true", help="配合 --probe，开放后也允许演练")
+    ap.add_argument("--single", action="store_true", help="数字选择一门课，设置时长后立即捡漏")
     args = ap.parse_args()
+    if args.single and (args.dry_run or args.now or args.probe or args.force):
+        ap.error("--single 请单独使用，不能与 --dry-run/--now/--probe/--force 同用")
 
     cfg = load_config()
+    if args.single:
+        return run_single(cfg)
     if args.dry_run:
         return dry_run(cfg)
     if args.probe:

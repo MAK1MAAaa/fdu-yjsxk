@@ -13,6 +13,7 @@ fdu-yjsxk/
 │   ├── cookies.py               # 浏览器与文件 Cookie 读取
 │   ├── client.py                # HTTP 会话、Token、提交与轮询
 │   ├── runner.py                # 串行调度、定时等待与恢复
+│   ├── single.py                # 单课程菜单与临时运行配置
 │   ├── diagnostics.py           # 自检与单次链路演练
 │   └── errors.py / logging.py   # 异常分类与日志
 ├── tests/                       # 离线回归与入口兼容测试
@@ -24,6 +25,7 @@ fdu-yjsxk/
 ├── config.example.json          # 配置字段示例
 ├── cookie.txt / grab.log         # 本地凭据与运行记录，不提交 Git
 ├── 一键抢课.command / .bat      # 原有 macOS / Windows 双击入口
+├── 单课程捡漏.command / .bat    # 数字选择一门课，立即开始捡漏
 ├── 先跑自检.command / .bat
 └── pyproject.toml / uv.lock      # 依赖声明与锁文件
 ```
