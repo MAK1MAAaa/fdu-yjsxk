@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from copy import deepcopy
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,55 @@ class EntrypointTests(unittest.TestCase):
                         with self.assertRaises(SystemExit) as raised:
                             cli.entrypoint()
                 self.assertEqual(raised.exception.code, expected)
+
+    def test_interactive_interval_preserves_schedule_and_original_config(self) -> None:
+        cfg = {
+            "request_interval": 0.8, "start_time": "2026-09-09 12:59:56",
+            "end_time": "2026-09-09 15:00:00", "homepage_refresh_secs": 60,
+            "courses": [{"name": "first"}, {"name": "second"}],
+        }
+        before = deepcopy(cfg)
+        for answer, expected in (("0.1", 0.1), ("", 0.8)):
+            with self.subTest(answer=answer):
+                with patch.object(sys, "argv", ["grab.py", "--ask-interval"]):
+                    with patch.object(cli, "load_config", return_value=cfg):
+                        with patch("builtins.input", return_value=answer), patch("builtins.print"):
+                            with patch.object(cli, "run", return_value=1) as run:
+                                self.assertEqual(cli.main(), 1)
+                session = run.call_args.args[0]
+                self.assertEqual(session, {**before, "request_interval": expected})
+                self.assertEqual(run.call_args.kwargs, {"start_now": False})
+                self.assertIsNot(session["courses"], cfg["courses"])
+                self.assertEqual(cfg, before)
+
+    def test_interval_cancel_never_starts_run(self) -> None:
+        for answer in ("0", EOFError()):
+            with self.subTest(answer=answer):
+                with patch.object(sys, "argv", ["grab.py", "--ask-interval"]):
+                    with patch.object(cli, "load_config", return_value={"request_interval": 0.8}):
+                        with patch("builtins.input", side_effect=[answer]), patch("builtins.print"):
+                            with patch.object(cli, "run") as run:
+                                self.assertEqual(cli.main(), 0)
+                                run.assert_not_called()
+
+    def test_interval_conflicts_are_rejected_before_config_read(self) -> None:
+        for flag in ("--single", "--dry-run", "--probe", "--force"):
+            with self.subTest(flag=flag):
+                with patch.object(sys, "argv", ["grab.py", "--ask-interval", flag]):
+                    with patch.object(cli, "load_config") as load, patch("sys.stderr"):
+                        with self.assertRaises(SystemExit) as error:
+                            cli.main()
+                        self.assertEqual(error.exception.code, 2)
+                        load.assert_not_called()
+
+    def test_original_cli_does_not_prompt_for_interval(self) -> None:
+        cfg = {"request_interval": 0.8}
+        with patch.object(sys, "argv", ["grab.py"]):
+            with patch.object(cli, "load_config", return_value=cfg):
+                with patch("builtins.input") as prompt, patch.object(cli, "run", return_value=0) as run:
+                    self.assertEqual(cli.main(), 0)
+                    prompt.assert_not_called()
+                    run.assert_called_once_with(cfg, start_now=False)
 
 
 if __name__ == "__main__":

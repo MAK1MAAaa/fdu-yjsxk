@@ -13,14 +13,15 @@ if errorlevel 1 (
   exit /b 1
 )
 
-uv run --locked python grab.py
+uv run --locked python grab.py --ask-interval
 set CODE=%ERRORLEVEL%
 
 echo.
 echo ==================================
 echo  脚本结束（退出码 %CODE%）
-echo  退出码 0 = 全部拿下；1 = 有课没抢到
+echo  退出码 0 = 目标完成或启动前取消；1 = 未完成或出错
 echo ==================================
 echo.
 echo 按任意键关闭窗口...
 pause >nul
+exit /b %CODE%

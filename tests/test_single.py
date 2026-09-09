@@ -6,9 +6,9 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
-from fdu_yjsxk import cli, single
+from fdu_yjsxk import cli, logging, single
 
 
 class SingleCourseTests(unittest.TestCase):
@@ -54,7 +54,7 @@ class SingleCourseTests(unittest.TestCase):
         self.assertEqual(self.cfg, self.before)
 
     def test_menu_selects_exactly_one_course_and_defaults_to_two_hours(self) -> None:
-        with patch("builtins.input", side_effect=["2", ""]), patch("builtins.print"):
+        with patch("builtins.input", side_effect=["2", "", ""]), patch("builtins.print"):
             with patch.object(single, "run", return_value=1) as run:
                 self.assertEqual(single.run_single(self.cfg), 1)
         run.assert_called_once()
@@ -62,6 +62,7 @@ class SingleCourseTests(unittest.TestCase):
         session = args[0]
         self.assertEqual([c["bjdm"] for c in session["courses"]], ["D"])
         self.assertEqual(kwargs, {"start_now": True})
+        self.assertEqual(session["request_interval"], 0.8)
         start = datetime.fromisoformat(session["start_time"])
         end = datetime.fromisoformat(session["end_time"])
         self.assertEqual((end - start).total_seconds(), 7200)
@@ -74,7 +75,7 @@ class SingleCourseTests(unittest.TestCase):
         self.assertEqual(result["end_time"], "2026-09-09 00:30:00")
 
     def test_success_reports_target_and_stops_after_one_run(self) -> None:
-        with patch("builtins.input", side_effect=["2", "1"]), patch("builtins.print"):
+        with patch("builtins.input", side_effect=["2", "1", ""]), patch("builtins.print"):
             with patch.object(single, "run", return_value=0) as run:
                 self.assertEqual(single.run_single(self.cfg), 0)
         run.assert_called_once()
@@ -85,7 +86,7 @@ class SingleCourseTests(unittest.TestCase):
         self.assertIn("本次耗时", messages)
 
     def test_failure_report_does_not_claim_success(self) -> None:
-        with patch("builtins.input", side_effect=["1", "1"]), patch("builtins.print"):
+        with patch("builtins.input", side_effect=["1", "1", ""]), patch("builtins.print"):
             with patch.object(single, "run", return_value=1):
                 self.assertEqual(single.run_single(self.cfg), 1)
         messages = "\n".join(call.args[0] for call in self.logger.call_args_list)
@@ -98,7 +99,8 @@ class SingleCourseTests(unittest.TestCase):
                 self.assertEqual(single.read_number("选择：", 2), 2)
 
     def test_cancel_or_eof_never_enters_enrollment_loop(self) -> None:
-        for answers in (["0"], ["1", "0"], [EOFError()], ["1", EOFError()]):
+        for answers in (["0"], ["1", "0"], [EOFError()], ["1", EOFError()],
+                        ["1", "1", "0"], ["1", "1", EOFError()]):
             with self.subTest(answers=answers):
                 with patch("builtins.input", side_effect=answers), patch("builtins.print"):
                     with patch.object(single, "run") as run:
@@ -126,6 +128,46 @@ class SingleCourseTests(unittest.TestCase):
                         self.assertEqual(cli.main(), 0)
                         run_single.assert_called_once_with(self.cfg)
                         regular.assert_not_called()
+
+    def test_custom_interval_only_changes_in_memory_run(self) -> None:
+        with patch("builtins.input", side_effect=["1", "30", "0.1"]), patch("builtins.print"):
+            with patch.object(single, "run", return_value=0) as run:
+                self.assertEqual(single.run_single(self.cfg), 0)
+        session = run.call_args.args[0]
+        self.assertEqual(session["request_interval"], 0.1)
+        self.assertEqual(session["cookie_refresh_secs"], 240)
+        self.assertEqual(self.cfg, self.before)
+
+    def test_invalid_intervals_are_reprompted(self) -> None:
+        with patch("builtins.input", side_effect=["nan", "inf", "-1", "0.01", "61", "text", "0.2"]):
+            with patch("builtins.print"):
+                self.assertEqual(single.read_request_interval(0.8), 0.2)
+
+    def test_builder_rejects_invalid_interval(self) -> None:
+        for value in (0, -1, 0.01, 61, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                single.build_single_config(self.cfg, self.cfg["courses"][0], 1, datetime.now(), value)
+
+    def test_single_logging_does_not_write_files_and_restores_other_modes(self) -> None:
+        def run(*args, **kwargs):
+            logging.log("模拟客户端日志")
+            return 0
+
+        with patch("builtins.input", side_effect=["1", "1", ""]), patch("builtins.print"):
+            with patch("builtins.open", mock_open()) as opened:
+                with patch.object(single, "run", side_effect=run):
+                    single.run_single(self.cfg)
+                opened.assert_not_called()
+                logging.log("正常入口仍然保存日志")
+                opened.assert_called_once()
+
+    def test_single_entrypoint_error_does_not_write_file(self) -> None:
+        with patch.object(sys, "argv", ["grab.py", "--single"]):
+            with patch.object(cli, "main", side_effect=ValueError("测试失败")):
+                with patch("builtins.open", side_effect=AssertionError("不应写日志")), patch("builtins.print"):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.entrypoint()
+        self.assertEqual(raised.exception.code, 1)
 
     def test_conflicting_flags_fail_before_loading_config(self) -> None:
         for flag in ("--dry-run", "--probe", "--force", "--now"):

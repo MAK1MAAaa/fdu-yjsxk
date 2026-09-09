@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import datetime as dt
+import math
 import time
 
-from .logging import log
+from .logging import console_only, log
 from .runner import run
 from .settings import validate_config
 
@@ -40,7 +41,33 @@ def read_number(prompt: str, maximum: int, default: int | None = None) -> int:
         print(f"请输入 1 至 {maximum} 的单个整数，或输入 0 退出。")
 
 
-def build_single_config(cfg: dict, course: dict, minutes: int, now: dt.datetime) -> dict:
+def validate_request_interval(value: float) -> float:
+    if not math.isfinite(value) or not 0.1 <= value <= 60:
+        raise ValueError("请求间隔必须是 0.1—60 秒之间的有限数字")
+    return value
+
+
+def read_request_interval(default: float) -> float | None:
+    while True:
+        try:
+            raw = input(
+                f"请求间隔秒数（0.1—60，回车默认 {default:g}，0 退出；确认后立即开始）："
+            ).strip()
+        except EOFError:
+            return None
+        try:
+            value = float(raw) if raw else default
+            if value == 0:
+                return None
+            return validate_request_interval(value)
+        except ValueError as exc:
+            print(f"输入无效：{exc}")
+
+
+def build_single_config(
+    cfg: dict, course: dict, minutes: int, now: dt.datetime,
+    request_interval: float | None = None,
+) -> dict:
     if not 1 <= minutes <= MAX_MINUTES:
         raise ValueError(f"运行分钟数必须在 1 至 {MAX_MINUTES} 之间")
     result = deepcopy(cfg)
@@ -49,16 +76,19 @@ def build_single_config(cfg: dict, course: dict, minutes: int, now: dt.datetime)
     result["end_time"] = (now + dt.timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
     result["serial_mode"] = True
     result["full_max_tries"] = 0
+    if request_interval is not None:
+        result["request_interval"] = validate_request_interval(request_interval)
     validate_config(result)
     return result
 
 
+@console_only()
 def run_single(cfg: dict) -> int:
     courses = available_courses(cfg)
     if not courses:
         print("config.json 中没有启用且未标记已选的课程，未发起任何选课请求。")
         return 0
-    print("单课程捡漏：本次只尝试一门课，不修改 config.json。")
+    print("单课程捡漏：直接串行提交一门课，不先查余量，不修改 config.json，不保存日志文件。")
     print("请勿同时运行其他抢课脚本；列表来自本地配置，不是实时已选课程查询。")
     for index, course in enumerate(courses, 1):
         print(f"  {index}. {course['name']}（{course['bjdm']}）")
@@ -69,15 +99,20 @@ def run_single(cfg: dict) -> int:
     course = courses[choice - 1]
     print(f"本次目标：{course['name']}（{course['bjdm']}）")
     minutes = read_number(
-        f"运行分钟数（1—{MAX_MINUTES}，回车默认 {DEFAULT_MINUTES}，0 退出；确认后立即开始）：",
+        f"运行分钟数（1—{MAX_MINUTES}，回车默认 {DEFAULT_MINUTES}，0 退出）：",
         MAX_MINUTES, DEFAULT_MINUTES,
     )
     if minutes == 0:
         print("已取消，未发起选课请求。")
         return 0
-    session_cfg = build_single_config(cfg, course, minutes, dt.datetime.now())
+    interval = read_request_interval(float(cfg.get("request_interval", 0.8)))
+    if interval is None:
+        print("已取消，未发起选课请求。")
+        return 0
+    session_cfg = build_single_config(cfg, course, minutes, dt.datetime.now(), interval)
     print(f"本次截止：{session_cfg['end_time']}；选上、已选或到时停止，Ctrl+C 可中止。")
-    print("沿用请求间隔与 Cookie 设置；本次满额不限重试次数，服务器暂停要求仍有效。")
+    print(f"本次请求间隔 {interval:g} 秒；这是结果返回后的等待，不是固定每秒请求数。")
+    print("沿用主页刷新、Cookie 与轮询设置；满额持续重试，服务器暂停和退避要求仍有效。")
     started = time.monotonic()
     code = run(session_cfg, start_now=True)
     elapsed = time.monotonic() - started
@@ -90,6 +125,6 @@ def run_single(cfg: dict) -> int:
         log("已自动停止，不会继续重试，也不会转抢其他课程。")
     else:
         log("结果：未选上、尚未确认或运行失败，不计为成功；请查看上方原因。")
-    log("请在选课系统的已选课程页核对最终状态。本汇总已写入 grab.log。")
+    log("请在选课系统的已选课程页核对最终状态。本汇总仅显示在终端，不写日志文件。")
     log("=" * 46)
     return code

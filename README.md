@@ -25,7 +25,7 @@ fdu-yjsxk/
 ├── config.example.json          # 配置字段示例
 ├── cookie.txt / grab.log         # 本地凭据与运行记录，不提交 Git
 ├── 一键抢课.command / .bat      # 原有 macOS / Windows 双击入口
-├── 单课程捡漏.command / .bat    # 数字选择一门课，立即开始捡漏
+├── 单课程捡漏.command / .bat    # 数字选课、自定义间隔，直接捡漏（不保存日志）
 ├── 先跑自检.command / .bat
 └── pyproject.toml / uv.lock      # 依赖声明与锁文件
 ```

@@ -135,7 +135,7 @@ class GrabberTests(unittest.TestCase):
         self.assertEqual(done, [])
 
     def test_single_course_run_never_submits_other_courses(self) -> None:
-        self.cfg = single.build_single_config(self.cfg, COURSES[1], 1, self.clock)
+        self.cfg = single.build_single_config(self.cfg, COURSES[1], 1, self.clock, 0.1)
         self.gr.cfg = self.cfg
         self.gr.submit = Mock(side_effect=[(False, FULL), (True, "test-xid")])
         self.gr.poll_result = Mock(return_value=(1, "选课成功"))
@@ -144,6 +144,7 @@ class GrabberTests(unittest.TestCase):
         self.assertEqual([call.args[0]["bjdm"] for call in self.gr.submit.call_args_list],
                          [COURSES[1]["bjdm"], COURSES[1]["bjdm"]])
         self.gr.poll_result.assert_called_once_with("test-xid")
+        self.assertEqual(self.sleeps, [0.1, 0.1])
 
     def test_full_limit_exit_code_is_not_success(self) -> None:
         self.cfg["full_max_tries"] = 1

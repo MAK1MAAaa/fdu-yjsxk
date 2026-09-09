@@ -40,16 +40,17 @@ fi
 echo ""
 echo "自检通过，按 config.json 中的 start_time 开始、end_time 停止。"
 if command -v caffeinate >/dev/null 2>&1; then
-  caffeinate -dimsu "$UV" run --locked python grab.py
+  caffeinate -dimsu "$UV" run --locked python grab.py --ask-interval
 else
-  "$UV" run --locked python grab.py
+  "$UV" run --locked python grab.py --ask-interval
 fi
 code=$?
 
 echo ""
 echo "=================================="
 echo " 脚本结束（退出码 $code）"
-echo " 退出码 0 = 全部拿下；1 = 有课没抢到"
+echo " 退出码 0 = 目标完成或启动前取消；1 = 未完成或出错"
 echo "=================================="
 echo "按回车键关闭窗口..."
 read
+exit "$code"
