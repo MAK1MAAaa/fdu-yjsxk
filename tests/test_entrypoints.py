@@ -15,6 +15,17 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class EntrypointTests(unittest.TestCase):
+    def test_launchers_resolve_project_parent(self) -> None:
+        for name in ("一键抢课", "单课程捡漏", "先跑自检"):
+            with self.subTest(name=name):
+                mac = ROOT / "scripts" / f"{name}.command"
+                windows = ROOT / "scripts" / f"{name}.bat"
+                self.assertIn('cd "${0:A:h}/.." || exit 1', mac.read_text())
+                self.assertIn('cd /d "%~dp0.."', windows.read_text())
+                self.assertIn('if errorlevel 1 exit /b 1', windows.read_text())
+                self.assertFalse((ROOT / mac.name).exists())
+                self.assertFalse((ROOT / windows.name).exists())
+
     def test_old_entrypoint_works_from_another_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(

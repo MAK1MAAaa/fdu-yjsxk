@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>课程工作台 · FDU</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+<header class="hero">
+ <div><div class="eyebrow">FDU / COURSE CATALOG</div><h1>课程工作台<span>选课前，先选好。</span></h1><p class="subtitle">浏览采集清单、筛选教学班，一键生成选课配置。</p></div>
+ <label class="import-button">导入清单 JSON<input type="file" id="file" accept=".json,application/json"></label>
+</header>
+<section class="metrics" aria-label="清单概览">
+ <div><span>清单教学班</span><strong id="countTotal">0</strong><small>来自最近一次采集</small></div>
+ <div><span>采集时未满</span><strong id="countAvailable">0</strong><small>名额状态非实时</small></div>
+ <div><span>已勾选课程</span><strong id="countSelected">0</strong><small>支持跨分类批量复制</small></div>
+ <div class="hint-card"><span>只读工作台</span><p>这里不会提交选课请求，<br>也不会修改 config.json。</p></div>
+</section>
+<section class="workspace">
+ <div class="section-title"><h2>筛选课程</h2><button id="resetFilters" class="quiet">重置筛选</button></div>
+ <section class="toolbar" aria-label="课程筛选">
+ <input id="search" type="search" placeholder="搜索课程、教师、代码或地点" aria-label="搜索课程">
+ <select id="group" aria-label="课程大类"><option value="">全部大类</option><option value="7">学位公共课</option><option value="8">学科专业课</option></select>
+ <select id="category" aria-label="课程分类"><option value="">全部分类</option></select>
+ <select id="capacity" aria-label="容量筛选"><option value="">全部容量</option><option>未满</option><option>已满</option><option>未知</option></select>
+ <label class="check-label"><input type="checkbox" id="hideConflict">隐藏冲突</label>
+ </section>
+ <nav id="categoryTabs" aria-label="按课程分类筛选"></nav>
+ <div class="list-bar"><span id="summary">等待课程数据</span><div class="actions"><button id="clear" class="quiet">清空勾选</button><button class="primary" id="copySelected" disabled>复制已勾选（0）</button></div></div>
+ <div class="table-wrap" id="table" hidden><table><thead><tr><th><input type="checkbox" id="all" aria-label="勾选当前筛选结果"></th><th>课程 / 教师</th><th>分类</th><th>学分</th><th>时间与地点</th><th>容量</th><th>配置</th></tr></thead><tbody id="rows"></tbody></table><div id="empty" hidden>没有匹配的课程，试试调整筛选条件。</div></div>
+ <div id="status" role="status" aria-live="polite"></div>
+</section>
+<footer><p id="notes"></p><p>容量与冲突为采集时快照。“已满”课程仍可复制用于捡漏；复制条目均为 enabled: true，请核对后粘贴到 courses 数组。</p></footer>
+</main>
+<dialog id="copyDialog"><h2>复制课程配置</h2><p>浏览器未允许自动复制。文本已选中，可按 Cmd+C / Ctrl+C。</p><textarea id="copyText" readonly aria-label="待复制的配置"></textarea><button id="closeDialog">关闭</button></dialog>
+<script src="app.js"></script>
+</body>
+</html>

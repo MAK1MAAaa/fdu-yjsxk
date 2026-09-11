@@ -1,5 +1,5 @@
 #!/bin/zsh
-cd "${0:A:h}" || exit 1
+cd "${0:A:h}/.." || exit 1
 
 fdu_uv="$(command -v uv 2>/dev/null)"
 if [ -z "$fdu_uv" ]; then

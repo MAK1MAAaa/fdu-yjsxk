@@ -1,6 +1,6 @@
 #!/bin/zsh
 # 一键抢课 —— 双击即可运行
-cd "${0:A:h}" || exit 1
+cd "${0:A:h}/.." || exit 1
 
 UV="$(command -v uv 2>/dev/null)"
 if [ -z "$UV" ]; then

@@ -7,9 +7,13 @@ venv/
 
 # 敏感信息 —— 千万别提交
 cookie.txt
+.env
+.env.*
+!.env.example
 config.local.json
 config.json
 grab.log
+exports/
 
 # 系统文件
 .DS_Store

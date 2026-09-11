@@ -1,7 +1,8 @@
 @echo off
 chcp 65001 >nul
 REM 一键抢课 —— 双击即可运行（Windows 版）
-cd /d "%~dp0"
+cd /d "%~dp0.."
+if errorlevel 1 exit /b 1
 
 where uv >nul 2>&1
 if errorlevel 1 (
