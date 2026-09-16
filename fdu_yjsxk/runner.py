@@ -16,10 +16,11 @@ REFRESH_GUARD_SECS = 5
 
 
 def cache_resume_at(now: dt.datetime, interval: float) -> dt.datetime:
-    release = now.replace(hour=13, minute=0, second=0, microsecond=0)
-    if now < release:
-        return release
-    return now + dt.timedelta(seconds=max(interval, 0.8))
+    """缓存期等待到 12:59:59，之后沿用请求间隔，不设额外下限。"""
+    first_attempt = now.replace(hour=12, minute=59, second=59, microsecond=0)
+    if now < first_attempt:
+        return first_attempt
+    return now + dt.timedelta(seconds=interval)
 
 
 def already_have(msg: str) -> bool:
@@ -277,10 +278,10 @@ def run(cfg: dict, start_now: bool) -> int:
             break
         except CachePause:
             resume = min(cache_resume_at(dt.datetime.now(), interval), end_time)
-            log(f"服务器数据缓存中，等待至 {resume:%H:%M:%S.%f} 后从第一顺位重试")
+            log(f"服务器数据缓存中，等待至 {resume:%H:%M:%S.%f} 后从第一顺位重试；12:59:59 起沿用请求间隔 {interval:g}s")
             refresh_deferred_until = resume + dt.timedelta(seconds=REFRESH_GUARD_SECS)
             if resume < end_time:
-                prepare_and_wait(resume, "等待缓存结束", gr, cfg, refresh_secs)
+                prepare_and_wait(resume, "等待缓存重试时刻", gr, cfg, refresh_secs)
             else:
                 gr.pause((resume - dt.datetime.now()).total_seconds())
             continue

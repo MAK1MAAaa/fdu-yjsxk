@@ -153,7 +153,7 @@ class GrabberTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(len(self.gr.exhausted), 2)
 
-    def test_cache_pause_waits_until_release_and_restarts_first_priority(self) -> None:
+    def test_cache_pause_uses_interval_before_release_and_restarts_first_priority(self) -> None:
         self.clock = datetime(2026, 9, 7, 12, 59, 56)
         release = datetime(2026, 9, 7, 13, 0)
         self.cfg["full_max_tries"] = 1
@@ -165,11 +165,11 @@ class GrabberTests(unittest.TestCase):
 
         self.gr.submit = Mock(side_effect=submit)
         self.run_local()
-        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(attempts), 5)
         self.assertEqual(attempts[0][0], COURSES[0]["bjdm"])
-        self.assertEqual(attempts[1], (COURSES[0]["bjdm"], release))
-        self.assertEqual(attempts[2][0], COURSES[1]["bjdm"])
-        self.assertTrue(all(at >= release for _, at in attempts[1:]))
+        self.assertEqual(attempts[1], (COURSES[0]["bjdm"], datetime(2026, 9, 7, 12, 59, 59)))
+        self.assertEqual(attempts[-2], (COURSES[0]["bjdm"], release + timedelta(seconds=0.6)))
+        self.assertEqual(attempts[-1][0], COURSES[1]["bjdm"])
         self.assertEqual(self.gr.session.get.call_count, 1)
 
     def test_cache_release_skips_slow_homepage_request(self) -> None:
@@ -189,7 +189,10 @@ class GrabberTests(unittest.TestCase):
         self.gr.session.get.side_effect = homepage
         self.gr.submit = Mock(side_effect=submit)
         self.run_local()
-        self.assertEqual(attempts[1], (COURSES[0]["bjdm"], release))
+        first_released = next(at for _, at in attempts if at >= release)
+        self.assertLess(first_released - release, timedelta(seconds=0.8))
+        self.assertEqual(attempts[1][1], datetime(2026, 9, 7, 12, 59, 59))
+        self.assertTrue(all(b[1] - a[1] == timedelta(seconds=0.8) for a, b in zip(attempts[1:], attempts[2:])))
         self.assertEqual(self.gr.session.get.call_count, 1)
 
     def test_repeated_cache_preserves_token_cookie_and_request_interval(self) -> None:
@@ -208,7 +211,7 @@ class GrabberTests(unittest.TestCase):
             [COURSES[0]["bjdm"]] * 3 + [COURSES[1]["bjdm"]],
         )
 
-    def test_sixty_second_refresh_keeps_prewarm_and_release_submission(self) -> None:
+    def test_sixty_second_refresh_resumes_after_continuous_cache_retries(self) -> None:
         self.clock = datetime(2026, 9, 7, 12, 59)
         self.cfg["homepage_refresh_secs"] = 60
         self.cfg["end_time"] = "2026-09-07 13:01:00"
@@ -227,12 +230,41 @@ class GrabberTests(unittest.TestCase):
         self.gr.session.get.side_effect = homepage
         self.gr.submit = Mock(side_effect=submit)
         self.run_local()
-        self.assertEqual(refresh_times[:2], [
-            datetime(2026, 9, 7, 12, 59), datetime(2026, 9, 7, 12, 59, 40),
-        ])
-        self.assertEqual(attempts[1], release)
-        self.assertGreater(len(refresh_times), 2)
-        self.assertGreaterEqual(refresh_times[2], datetime(2026, 9, 7, 13, 0, 40))
+        self.assertEqual(refresh_times[0], datetime(2026, 9, 7, 12, 59))
+        self.assertEqual(attempts[1], datetime(2026, 9, 7, 12, 59, 59))
+        self.assertEqual(refresh_times[1], datetime(2026, 9, 7, 12, 59, 39))
+        self.assertGreaterEqual(len(refresh_times), 3)
+        self.assertGreaterEqual(refresh_times[2], release + timedelta(seconds=5))
+
+    def test_cache_interval_has_no_special_time_floor(self) -> None:
+        for hour, minute, second in ((12, 59, 59), (13, 0, 0), (13, 0, 3)):
+            for interval in (0.1, 0.2, 0.8, 2):
+                now = datetime(2026, 9, 7, hour, minute, second)
+                self.assertEqual(runner.cache_resume_at(now, interval) - now, timedelta(seconds=interval))
+
+    def test_early_cache_waits_to_one_second_before_release(self) -> None:
+        for now in (datetime(2026, 9, 7, 12, 50, 1), datetime(2026, 9, 7, 12, 59, 58, 950000)):
+            self.assertEqual(runner.cache_resume_at(now, 0.1), datetime(2026, 9, 7, 12, 59, 59))
+
+    def test_single_cache_retries_at_100ms_and_stops_at_deadline(self) -> None:
+        self.clock = datetime(2026, 9, 7, 12, 59, 59)
+        self.cfg = single.build_single_config(self.cfg, COURSES[0], 1, self.clock, 0.1)
+        self.cfg['end_time'] = '2026-09-07 13:00:00'
+        self.gr.cfg = self.cfg
+        self.gr.submit = Mock(return_value=(False, CACHE))
+        self.run_local()
+        self.assertEqual(self.gr.submit.call_count, 10)
+        self.assertEqual(self.sleeps, [0.1] * 10)
+        self.assertEqual(self.clock, datetime(2026, 9, 7, 13, 0))
+
+    def test_early_cache_does_not_retry_past_deadline(self) -> None:
+        self.clock = datetime(2026, 9, 7, 12, 50, 1)
+        self.cfg['start_time'] = '2026-09-07 12:50:01'
+        self.cfg['end_time'] = '2026-09-07 12:50:02'
+        self.gr.submit = Mock(return_value=(False, CACHE))
+        self.run_local()
+        self.assertEqual(self.gr.submit.call_count, 1)
+        self.assertEqual(self.clock, datetime(2026, 9, 7, 12, 50, 2))
 
     def test_routine_refresh_resumes_after_release_guard(self) -> None:
         self.cfg["courses"] = [deepcopy(COURSES[0])]
