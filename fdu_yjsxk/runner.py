@@ -16,8 +16,8 @@ REFRESH_GUARD_SECS = 5
 
 
 def cache_resume_at(now: dt.datetime, interval: float) -> dt.datetime:
-    """缓存期等待到 12:59:59，之后沿用请求间隔，不设额外下限。"""
-    first_attempt = now.replace(hour=12, minute=59, second=59, microsecond=0)
+    """缓存期等待到 13:00:00，之后沿用请求间隔，不设额外下限。"""
+    first_attempt = now.replace(hour=13, minute=0, second=0, microsecond=0)
     if now < first_attempt:
         return first_attempt
     return now + dt.timedelta(seconds=interval)
@@ -253,10 +253,19 @@ def run(cfg: dict, start_now: bool) -> int:
     done: list = []
     round_no = 0
     failures = 0
+    cache_release_refresh_at: dt.datetime | None = None
 
     while pending and dt.datetime.now() < end_time:
         round_no += 1
         try:
+            if cache_release_refresh_at is not None and dt.datetime.now() >= cache_release_refresh_at:
+                gr.check_deadline()
+                # 清除一次性标记；失败则交由现有异常恢复逻辑处理，不能用旧 Token 直接提交。
+                cache_release_refresh_at = None
+                gr.token = None
+                log("缓存等待结束：先刷新一次主页，再从第一顺位提交选课")
+                gr.refresh_token()
+                refresh_deferred_until = dt.datetime.now() + dt.timedelta(seconds=REFRESH_GUARD_SECS)
             if not gr.inflight:
                 routine_refresh = (
                     refresh_deferred_until is None
@@ -277,8 +286,12 @@ def run(cfg: dict, start_now: bool) -> int:
         except DeadlineReached:
             break
         except CachePause:
-            resume = min(cache_resume_at(dt.datetime.now(), interval), end_time)
-            log(f"服务器数据缓存中，等待至 {resume:%H:%M:%S.%f} 后从第一顺位重试；12:59:59 起沿用请求间隔 {interval:g}s")
+            now = dt.datetime.now()
+            release = now.replace(hour=13, minute=0, second=0, microsecond=0)
+            if now < release:
+                cache_release_refresh_at = release
+            resume = min(cache_resume_at(now, interval), end_time)
+            log(f"服务器数据缓存中，等待至 {resume:%H:%M:%S.%f}；13:00:00 先刷新一次，此后按 {interval:g}s 间隔重试")
             refresh_deferred_until = resume + dt.timedelta(seconds=REFRESH_GUARD_SECS)
             if resume < end_time:
                 prepare_and_wait(resume, "等待缓存重试时刻", gr, cfg, refresh_secs)

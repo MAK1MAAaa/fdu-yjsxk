@@ -165,14 +165,14 @@ class GrabberTests(unittest.TestCase):
 
         self.gr.submit = Mock(side_effect=submit)
         self.run_local()
-        self.assertEqual(len(attempts), 5)
+        self.assertEqual(len(attempts), 3)
         self.assertEqual(attempts[0][0], COURSES[0]["bjdm"])
-        self.assertEqual(attempts[1], (COURSES[0]["bjdm"], datetime(2026, 9, 7, 12, 59, 59)))
-        self.assertEqual(attempts[-2], (COURSES[0]["bjdm"], release + timedelta(seconds=0.6)))
+        self.assertEqual(attempts[1], (COURSES[0]["bjdm"], release))
+        self.assertEqual(attempts[-2], (COURSES[0]["bjdm"], release))
         self.assertEqual(attempts[-1][0], COURSES[1]["bjdm"])
-        self.assertEqual(self.gr.session.get.call_count, 1)
+        self.assertEqual(self.gr.session.get.call_count, 2)
 
-    def test_cache_release_skips_slow_homepage_request(self) -> None:
+    def test_cache_release_waits_for_refresh_before_submission(self) -> None:
         self.clock = datetime(2026, 9, 7, 12, 59, 56)
         release = datetime(2026, 9, 7, 13, 0)
         self.cfg["full_max_tries"] = 1
@@ -190,10 +190,10 @@ class GrabberTests(unittest.TestCase):
         self.gr.submit = Mock(side_effect=submit)
         self.run_local()
         first_released = next(at for _, at in attempts if at >= release)
-        self.assertLess(first_released - release, timedelta(seconds=0.8))
-        self.assertEqual(attempts[1][1], datetime(2026, 9, 7, 12, 59, 59))
+        self.assertEqual(first_released - release, timedelta(seconds=1.2))
+        self.assertEqual(attempts[1][1], release + timedelta(seconds=1.2))
         self.assertTrue(all(b[1] - a[1] == timedelta(seconds=0.8) for a, b in zip(attempts[1:], attempts[2:])))
-        self.assertEqual(self.gr.session.get.call_count, 1)
+        self.assertEqual(self.gr.session.get.call_count, 2)
 
     def test_repeated_cache_preserves_token_cookie_and_request_interval(self) -> None:
         self.cfg["full_max_tries"] = 1
@@ -231,31 +231,78 @@ class GrabberTests(unittest.TestCase):
         self.gr.submit = Mock(side_effect=submit)
         self.run_local()
         self.assertEqual(refresh_times[0], datetime(2026, 9, 7, 12, 59))
-        self.assertEqual(attempts[1], datetime(2026, 9, 7, 12, 59, 59))
-        self.assertEqual(refresh_times[1], datetime(2026, 9, 7, 12, 59, 39))
+        self.assertEqual(attempts[1], release)
+        self.assertEqual(refresh_times[1], datetime(2026, 9, 7, 12, 59, 40))
         self.assertGreaterEqual(len(refresh_times), 3)
-        self.assertGreaterEqual(refresh_times[2], release + timedelta(seconds=5))
+        self.assertEqual(refresh_times[2], release)
 
     def test_cache_interval_has_no_special_time_floor(self) -> None:
-        for hour, minute, second in ((12, 59, 59), (13, 0, 0), (13, 0, 3)):
+        for hour, minute, second in ((13, 0, 0), (13, 0, 3)):
             for interval in (0.1, 0.2, 0.8, 2):
                 now = datetime(2026, 9, 7, hour, minute, second)
                 self.assertEqual(runner.cache_resume_at(now, interval) - now, timedelta(seconds=interval))
 
-    def test_early_cache_waits_to_one_second_before_release(self) -> None:
+    def test_early_cache_waits_until_release(self) -> None:
         for now in (datetime(2026, 9, 7, 12, 50, 1), datetime(2026, 9, 7, 12, 59, 58, 950000)):
-            self.assertEqual(runner.cache_resume_at(now, 0.1), datetime(2026, 9, 7, 12, 59, 59))
+            self.assertEqual(runner.cache_resume_at(now, 0.1), datetime(2026, 9, 7, 13, 0))
+
+    def test_release_refresh_occurs_once_before_repeated_cache_submissions(self) -> None:
+        self.clock = datetime(2026, 9, 7, 12, 59, 59)
+        self.cfg.update(courses=[deepcopy(COURSES[0])], request_interval=0.1, full_max_tries=1)
+        events = []
+        def homepage(*args, **kwargs):
+            events.append(('refresh', self.clock))
+            return response(text=f'<input id="csrfToken" value="{TOKEN}">')
+        def submit(course):
+            events.append(('submit', self.clock))
+            self.assertEqual(self.gr.token, TOKEN)
+            return False, CACHE if len([e for e in events if e[0] == 'submit']) <= 3 else FULL
+        self.gr.session.get.side_effect = homepage
+        self.gr.submit = Mock(side_effect=submit)
+        self.run_local()
+        release = datetime(2026, 9, 7, 13, 0)
+        self.assertEqual([e for e in events if e[0] == 'refresh'], [
+            ('refresh', datetime(2026, 9, 7, 12, 59, 59)), ('refresh', release)])
+        self.assertEqual(events[2:4], [('refresh', release), ('submit', release)])
+        self.assertEqual(events[4:], [('submit', release + timedelta(seconds=0.1)),
+                                     ('submit', release + timedelta(seconds=0.2))])
+
+    def test_release_refresh_failure_recovers_before_submission(self) -> None:
+        self.clock = datetime(2026, 9, 7, 12, 59, 59)
+        self.cfg.update(courses=[deepcopy(COURSES[0])], full_max_tries=1)
+        self.gr.session.get.side_effect = [
+            response(text=f'<input id="csrfToken" value="{TOKEN}">'),
+            requests.ConnectTimeout(),
+            response(text=f'<input id="csrfToken" value="{TOKEN}">'),
+        ]
+        attempts = []
+        def submit(course):
+            self.assertEqual(self.gr.token, TOKEN)
+            attempts.append(self.clock)
+            return False, CACHE if len(attempts) == 1 else FULL
+        self.gr.submit = Mock(side_effect=submit)
+        self.run_local()
+        self.assertEqual(attempts[1], datetime(2026, 9, 7, 13, 0, 1))
+        self.assertEqual(self.gr.session.get.call_count, 3)
+
+    def test_deadline_at_release_prevents_refresh_and_submission(self) -> None:
+        self.clock = datetime(2026, 9, 7, 12, 59, 59)
+        self.cfg['end_time'] = '2026-09-07 13:00:00'
+        self.gr.submit = Mock(return_value=(False, CACHE))
+        self.run_local()
+        self.assertEqual(self.gr.session.get.call_count, 1)
+        self.assertEqual(self.gr.submit.call_count, 1)
 
     def test_single_cache_retries_at_100ms_and_stops_at_deadline(self) -> None:
-        self.clock = datetime(2026, 9, 7, 12, 59, 59)
+        self.clock = datetime(2026, 9, 7, 13, 0)
         self.cfg = single.build_single_config(self.cfg, COURSES[0], 1, self.clock, 0.1)
-        self.cfg['end_time'] = '2026-09-07 13:00:00'
+        self.cfg['end_time'] = '2026-09-07 13:00:01'
         self.gr.cfg = self.cfg
         self.gr.submit = Mock(return_value=(False, CACHE))
         self.run_local()
         self.assertEqual(self.gr.submit.call_count, 10)
         self.assertEqual(self.sleeps, [0.1] * 10)
-        self.assertEqual(self.clock, datetime(2026, 9, 7, 13, 0))
+        self.assertEqual(self.clock, datetime(2026, 9, 7, 13, 0, 1))
 
     def test_early_cache_does_not_retry_past_deadline(self) -> None:
         self.clock = datetime(2026, 9, 7, 12, 50, 1)
